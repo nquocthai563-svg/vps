@@ -3,108 +3,84 @@
 
   packages = [
     pkgs.docker
-    pkgs.cloudflared
+    pkgs.bore-cli
     pkgs.socat
     pkgs.coreutils
     pkgs.gnugrep
     pkgs.sudo
-    pkgs.apt
-    pkgs.docker
-    pkgs.systemd
-    pkgs.unzip
     pkgs.netcat
   ];
 
   services.docker.enable = true;
 
   idx.workspace.onStart = {
-    novnc = ''
+    kali-rdp = ''
       set -e
+      mkdir -p ~/kali-vps
+      cd ~/kali-vps
 
-      # Make sure current directory exists
-      mkdir -p ~/vps
-      cd ~/vps
-
-      # One-time cleanup
-      if [ ! -f /home/user/.cleanup_done ]; then
-        rm -rf /home/user/.gradle/* /home/user/.emu/*
-        find /home/user -mindepth 1 -maxdepth 1 ! -name 'idx-ubuntu22-gui' ! -name '.*' -exec rm -rf {} +
-        touch /home/user/.cleanup_done
-      fi
-
-      # Pull and start container
-      if ! docker ps -a --format '{{.Names}}' | grep -qx 'ubuntu-novnc'; then
-        docker pull thuonghai2711/ubuntu-novnc-pulseaudio:22.04
-        docker run --name ubuntu-novnc \
-          --shm-size 1g -d \
+      # 1. Chạy Container Kali Linux
+      # Sử dụng bản rolling và cài đặt môi trường desktop + xrdp bên trong
+      if ! docker ps -a --format '{{.Names}}' | grep -qx 'kali-vps'; then
+        echo "⏳ Đang tải Kali Linux và thiết lập hệ thống (lần đầu sẽ hơi lâu)..."
+        
+        # Chạy container nền
+        docker run --name kali-vps \
+          --shm-size 2g -d \
           --cap-add=SYS_ADMIN \
-          -p 10000:10000 \
-          -e VNC_PASSWD=12345678 \
-          -e PORT=10000 \
-          -e AUDIO_PORT=1699 \
-          -e WEBSOCKIFY_PORT=6900 \
-          -e VNC_PORT=5900 \
-          -e SCREEN_WIDTH=1024 \
-          -e SCREEN_HEIGHT=768 \
-          -e SCREEN_DEPTH=24 \
-          thuonghai2711/ubuntu-novnc-pulseaudio:22.04
+          -p 3389:3389 \
+          kalilinux/kali-rolling \
+          sleep infinity
+
+        # Cài đặt môi trường đồ họa và RDP server
+        docker exec -u 0 kali-vps bash -c "
+          apt update && 
+          DEBIAN_FRONTEND=noninteractive apt install -y kali-desktop-xfce xrdp kali-linux-default &&
+          useradd -m -s /bin/bash kali &&
+          echo 'kali:12345678' | chpasswd &&
+          echo 'root:12345678' | chpasswd &&
+          service xrdp start
+        "
       else
-        docker start ubuntu-novnc || true
+        docker start kali-vps || true
+        docker exec -u 0 kali-vps service xrdp start || true
       fi
 
-      # Wait for Novnc WebSocket port
-      while ! nc -z localhost 10000; do sleep 1; done
+      # 2. Đợi port RDP (3389) sẵn sàng
+      echo "⏳ Đang đợi Kali RDP server khởi động..."
+      while ! nc -z localhost 3389; do sleep 1; done
 
-      # Install Chrome
-      docker exec -it ubuntu-novnc bash -lc "
-        sudo apt update &&
-        sudo apt remove -y firefox || true &&
-        sudo apt install -y wget &&
-        sudo wget -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb &&
-        sudo apt install -y /tmp/chrome.deb &&
-        sudo rm -f /tmp/chrome.deb
-      "
+      # 3. Chạy Bore để tạo Tunnel
+      rm -f /tmp/bore.log
+      nohup bore local 3389 --to bore.pub > /tmp/bore.log 2>&1 &
 
-      # Run Cloudflared tunnel
-      nohup cloudflared tunnel --no-autoupdate --url http://localhost:10000 \
-        > /tmp/cloudflared.log 2>&1 &
+      sleep 5
 
-      # Wait a bit longer to ensure WebSocket is fully ready
-      sleep 10
+      # 4. Lấy thông tin kết nối
+      BORE_INFO=$(grep -o "listening at bore.pub:[0-9]*" /tmp/bore.log | head -n1)
 
-      # Extract Cloudflared URL reliably
-      URL=""
-      for i in {1..15}; do
-        URL=$(grep -o "https://[a-z0-9.-]*trycloudflare.com" /tmp/cloudflared.log | head -n1)
-        if [ -n "$URL" ]; then break; fi
-        sleep 1
-      done
-
-      if [ -n "$URL" ]; then
+      if [ -n "$BORE_INFO" ]; then
+        PORT_ONLY=$(echo $BORE_INFO | cut -d':' -f2)
+        
         echo "========================================="
-        echo " 🌍 Your Cloudflared tunnel is ready:"
-        echo "   $URL"
-        echo "  Mật khẩu vps của bạn là:12345678"
+        echo " 🐉 KALI LINUX RDP IS READY!"
+        echo " 🖥️  Address: bore.pub"
+        echo " 🔢 Port: $PORT_ONLY"
+        echo " 👤 User: kali"
+        echo " 🔑 Pass: 12345678"
+        echo " -----------------------------------------"
+        echo " Kết nối bằng Remote Desktop: bore.pub:$PORT_ONLY"
         echo "=========================================="
       else
-        echo "❌ Cloudflared tunnel failed, check /tmp/cloudflared.log"
+        echo "❌ Lỗi: Bore không thể tạo tunnel. Kiểm tra /tmp/bore.log"
       fi
 
-      # Keep script alive
-      elapsed=0; while true; do echo "Time elapsed: $elapsed min"; ((elapsed++)); sleep 60; done
+      # Giữ script sống
+      while true; do sleep 60; done
     '';
   };
 
   idx.previews = {
-    enable = true;
-    previews = {
-      novnc = {
-        manager = "web";
-        command = [
-          "bash" "-lc"
-          "socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:10000"
-        ];
-      };
-    };
+    enable = false; # RDP không xem trực tiếp qua tab preview của IDX được
   };
 }
