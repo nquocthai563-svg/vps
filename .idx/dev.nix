@@ -3,76 +3,69 @@
 
   packages = [
     pkgs.docker
-    pkgs.bore-cli
+    pkgs.cloudflared
     pkgs.socat
     pkgs.coreutils
     pkgs.gnugrep
-    pkgs.sudo
+    pkgs.unzip
     pkgs.netcat
   ];
 
   services.docker.enable = true;
 
   idx.workspace.onStart = {
-    kali-rdp = ''
+    windows-tiny = ''
       set -e
-      mkdir -p ~/kali-vps
-      cd ~/kali-vps
+      mkdir -p ~/win-data
+      cd ~/win-data
 
-      # 1. Chạy Container Kali Linux
-      # Sử dụng bản rolling và cài đặt môi trường desktop + xrdp bên trong
-      if ! docker ps -a --format '{{.Names}}' | grep -qx 'kali-vps'; then
-        echo "⏳ Đang tải Kali Linux và thiết lập hệ thống (lần đầu sẽ hơi lâu)..."
-        
-        # Chạy container nền
-        docker run --name kali-vps \
-          --shm-size 2g -d \
-          --cap-add=SYS_ADMIN \
+      # Khởi tạo Container Windows Tiny
+      # VERSION: tiny11 (Bản rút gọn siêu nhẹ của Windows 11)
+      # RAM: 60G (Theo yêu cầu của Thống soái)
+      if ! docker ps -a --format '{{.Names}}' | grep -qx 'windows-tiny'; then
+        docker run --name windows-tiny -d \
+          --device=/dev/kvm \
+          --cap-add=NET_ADMIN \
           -p 3389:3389 \
-          kalilinux/kali-rolling \
-          sleep infinity
-
-        # Cài đặt môi trường đồ họa và RDP server
-        docker exec -u 0 kali-vps bash -c "
-          apt update && 
-          DEBIAN_FRONTEND=noninteractive apt install -y kali-desktop-xfce xrdp kali-linux-default &&
-          useradd -m -s /bin/bash kali &&
-          echo 'kali:12345678' | chpasswd &&
-          echo 'root:12345678' | chpasswd &&
-          service xrdp start
-        "
+          -p 8006:8006 \
+          -e VERSION="tiny11" \
+          -e RAM_SIZE="60G" \
+          -e CPU_CORES="4" \
+          -e USERNAME="oanhchaovunha" \
+          -e PASSWORD="thai211213" \
+          --stop-timeout 2 minutes \
+          dockurr/windows
       else
-        docker start kali-vps || true
-        docker exec -u 0 kali-vps service xrdp start || true
+        docker start windows-tiny || true
       fi
 
-      # 2. Đợi port RDP (3389) sẵn sàng
-      echo "⏳ Đang đợi Kali RDP server khởi động..."
-      while ! nc -z localhost 3389; do sleep 1; done
+      # Chờ cổng RDP (3389) sẵn sàng
+      echo "--- Đang khởi động động cơ Windows (60GB RAM) ---"
+      while ! nc -z localhost 3389; do sleep 2; done
 
-      # 3. Chạy Bore để tạo Tunnel
-      rm -f /tmp/bore.log
-      nohup bore local 3389 --to bore.pub > /tmp/bore.log 2>&1 &
+      # Kích hoạt Cloudflared Tunnel cho cổng RDP
+      nohup cloudflared tunnel --no-autoupdate --url tcp://localhost:3389 \
+        > /tmp/cloudflared_rdp.log 2>&1 &
 
-      sleep 5
+      sleep 10
 
-      # 4. Lấy thông tin kết nối
-      BORE_INFO=$(grep -o "listening at bore.pub:[0-9]*" /tmp/bore.log | head -n1)
+      # Trích xuất URL Cloudflare cho Thống soái
+      URL=""
+      for i in {1..20}; do
+        URL=$(grep -o "tcp://[a-z0-9.-]*trycloudflare.com:[0-9]*" /tmp/cloudflared_rdp.log | head -n1)
+        if [ -n "$URL" ]; then break; fi
+        sleep 2
+      done
 
-      if [ -n "$BORE_INFO" ]; then
-        PORT_ONLY=$(echo $BORE_INFO | cut -d':' -f2)
-        
+      if [ -n "$URL" ]; then
         echo "========================================="
-        echo " 🐉 KALI LINUX RDP IS READY!"
-        echo " 🖥️  Address: bore.pub"
-        echo " 🔢 Port: $PORT_ONLY"
-        echo " 👤 User: kali"
-        echo " 🔑 Pass: 12345678"
-        echo " -----------------------------------------"
-        echo " Kết nối bằng Remote Desktop: bore.pub:$PORT_ONLY"
+        echo " 🛡️ WINDOWS RDP READY 🛡️"
+        echo " 🔗 Link kết nối: $URL"
+        echo " 👤 User: oanhchaovunha"
+        echo " 🔑 Pass: thai211213"
         echo "=========================================="
       else
-        echo "❌ Lỗi: Bore không thể tạo tunnel. Kiểm tra /tmp/bore.log"
+        echo "❌ Tunnel thất bại, kiểm tra /tmp/cloudflared_rdp.log"
       fi
 
       # Giữ script sống
@@ -81,6 +74,15 @@
   };
 
   idx.previews = {
-    enable = false; # RDP không xem trực tiếp qua tab preview của IDX được
+    enable = true;
+    previews = {
+      # Preview này cho phép Ngài xem quá trình cài đặt qua trình duyệt (Port 8006)
+      install-view = {
+        manager = "web";
+        command = [
+          "socat" "TCP-LISTEN:$PORT,fork,reuseaddr" "TCP:127.0.0.1:8006"
+        ];
+      };
+    };
   };
 }
